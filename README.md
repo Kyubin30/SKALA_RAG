@@ -5,6 +5,9 @@
 >
 > ※ SOP(Standard Operating Procedure): 표준 작업 절차서. 제조 현장에서 작업 순서와 조건을 정해 둔 공식 문서
 
+📄 **설계 문서: [results/design.md](results/design.md)**
+RAG 설계 산출물입니다. 해결하려는 문제와 대상 사용자, 데이터 범위, Baseline 구성요소별 설계 의도, 개선 Pipeline 흐름도, 검색 개선 전략의 선택 이유, 평가 질문과 방법, 예상 한계를 담고 있습니다. 이 README는 그 설계를 구현하고 평가한 결과 보고서입니다.
+
 ## 1. 문제 정의
 
 ### 1.1 해결하려는 문제

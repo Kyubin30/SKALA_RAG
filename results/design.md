@@ -7,11 +7,11 @@
 FAB 현장에서 알람이 발생하면 매뉴얼을 빨리 찾아 1차 조치를 해야 합니다. 그런데 SOP는 공정별로 나뉘어 있고 알람 코드(`ETCH-ALM-2047` 등)도 많습니다. 그래서 원하는 조항을 찾는 데 시간이 걸립니다.
 이 RAG는 질문에 맞는 SOP 조항을 검색하고, **문서에 적힌 내용만** 근거로 답합니다.
 
-| 14.2 항목 | 정의 |
+| 항목 | 정의 |
 |---|---|
 | ① 누가 질문하는가 | FAB 오퍼레이터, 신입 공정 엔지니어 |
 | ② 어떤 문서를 검색하는가 | `data/fab.txt` (교육용 가상 SOP) |
-| ③ 어떤 질문까지 답하는가 | 문서에 적힌 공정 조건, 장비 PM 주기, 알람 코드별 1차 조치, 로트 Hold/Release·Rework 절차, SPC 관리, 클린룸·안전 수칙 |
+| ③ 어떤 질문까지 답하는가 | 문서에 적힌 공정 조건, 장비 PM 주기, 알람 코드별 1차 조치, 로트 Hold/Release·Rework 절차, 장비 Down·복구, SPC 관리, 클린룸·안전 수칙 |
 | ④ 근거가 없을 때 | "제공된 문서에서 확인할 수 없습니다."라고 답하고 추측하지 않음. 안전 관련 질문이면 담당 엔지니어·안전팀 확인을 안내 |
 
 **범위 밖**: 실제 수율·단가·고객 정보, 문서에 없는 장비·공정(예: EUV), 레시피 변경 승인 같은 의사결정.
@@ -32,6 +32,7 @@ FAB 현장에서 알람이 발생하면 매뉴얼을 빨리 찾아 1차 조치�
   - **비슷한 문장 반복**: 공정마다 "○○ 장비의 정기 점검(PM) 주기는 N주이다" 형식의 문장이 있습니다. 의미 검색이 공정을 혼동할 수 있습니다.
   - **코드형 식별자**: 알람 코드 13개(`ETCH-ALM-2047`, `CVD-ALM-1103`, `CVD-ALM-1104` …)가 같은 형식으로 설명되어 있습니다. 임베딩만으로는 숫자 하나 차이를 구분하기 어렵습니다.
   - **복합 질문**: 알람 조치(6장)와 로트 Release 승인(7장)처럼 답이 서로 다른 섹션에 흩어져 있습니다.
+  - **비슷한 절차**: 로트 Hold/Release와 장비 Down/복구가 비슷한 구조로 쓰여 있어 승인 주체가 헷갈리기 쉽습니다.
 
 ## 4. Baseline RAG 구조
 
@@ -51,7 +52,18 @@ Prompt          "문서만 근거로 답하고, 없으면 확인할 수 없다�
 LLM             gpt-4o-mini, temperature=0
 ```
 
-### 개선 Pipeline 흐름도 (14.9)
+### Baseline 설계 결정과 이유
+
+| 구성요소 | 선택 | 설계 의도 |
+|---|---|---|
+| Splitter | chunk_size=120, overlap=20 | SOP는 한 줄이 한 조항입니다. 1~2개 조항 단위로 잘라야 검색 결과가 곧 근거 조항이 됩니다. 교재 실습과 같은 값을 써서 개선 효과를 비교할 기준을 고정했습니다. |
+| Embedding | text-embedding-3-small | 문서 1개, chunk 36개 규모라 작은 모델로 충분합니다. 표현이 다른 질문("약품" ↔ "약액")을 의미로 찾는 역할입니다. |
+| Vector Store | FAISS (로컬) | 별도 서버 없이 실행되고 실습 환경과 같습니다. 실험마다 같은 인덱스를 다시 만들 수 있습니다. |
+| Retriever | similarity, **Top-2** | 알람 대응 상황에서는 짧고 정확한 근거가 필요합니다. Context를 작게 유지하는 조건에서 정답 근거를 확보하는지를 보려고 Top-2로 정했습니다. |
+| Prompt | 문서만 근거, 없으면 "제공된 문서에서 확인할 수 없습니다.", 안전 질문은 담당자 확인 안내 | 1장 ④의 근거 없음 처리 정책을 그대로 구현했습니다. 잘못된 조치가 사고로 이어질 수 있는 현장이라 추측 답변을 금지했습니다. |
+| LLM | gpt-4o-mini, temperature=0 | 같은 질문셋으로 전·후를 비교하므로 출력 흔들림을 줄였습니다. 비용이 낮아 Reranker처럼 호출이 많은 개선안도 실험할 수 있습니다. |
+
+### 개선 Pipeline 흐름도
 
 ```text
 Document
@@ -61,9 +73,9 @@ Loader → Splitter → Embedding → Vector Store (FAISS)
                                     ↓
 Question → Query Strategy (Decomposition: 복합 질문 → 하위 질문들)
                                     ↓
-           Retriever (Hybrid = EnsembleRetriever[FAISS + BM25], RRF 결합 후보 최대 2K개)
+           Retriever (Hybrid = EnsembleRetriever[FAISS + BM25], RRF 결합 후보 최대 4개)
                                     ↓
-           Rerank (LLM 관련성 0~100 점수로 재정렬, Top-K)
+           Rerank (LLM 관련성 0~100 점수로 재정렬, Top-2)
                                     ↓
            하위 질문별 결과 합치기 + 중복 제거
                                     ↓
@@ -78,7 +90,7 @@ Question → Query Strategy (Decomposition: 복합 질문 → 하위 질문들)
 
 교재 14.6의 "관찰된 문제 → 우선 검토할 방법" 표를 기준으로 선택했습니다.
 
-| 예상/관찰 문제 | 14.6 권장 방법 | 적용 | 구현 근거 |
+| 예상/관찰 문제 | 권장 방법 | 적용 | 구현 근거 |
 |---|---|---|---|
 | 알람 코드 같은 **코드·약어**가 Dense 검색으로 잘 구분되지 않음 | BM25 / Hybrid / Ensemble | **Hybrid (EnsembleRetriever)** | step10 `10_search_quality.py`의 EnsembleRetriever |
 | **복합 질문**의 답이 여러 섹션에 흩어져 Top-K에 다 들어오지 않음 | Query Rewrite / Decomposition | **Query Decomposition** | step11 `11_advanced_rag.py`의 `decompose_query()` |
@@ -106,9 +118,9 @@ Question → Query Strategy (Decomposition: 복합 질문 → 하위 질문들)
 | Q9 | 문서에 없음 | 이번 분기 웨이퍼 수율은 얼마인가요? | 없음 (Hit Rate 제외) |
 | Q10 | 문서에 없음 | EUV 노광 장비의 소스 파워 설정값은? | 없음 (Hit Rate 제외) |
 
-**평가 방법 (14.8)**
+**평가 방법**
 - **Retrieval**: Top-K 안에 정답 키워드가 있으면 HIT입니다. 복합 질문은 키워드가 **모두** 있어야 HIT입니다. Hit Rate는 Q1~Q8만으로 계산합니다.
-  - **MRR**: 정답 키워드가 처음 갖춰지는 순위의 역수를 평균한 값입니다. Hit Rate가 같아도 "관련 문서가 상위에 배치되는가"(14.8)를 비교할 수 있습니다.
+  - **MRR**: 정답 키워드가 처음 갖춰지는 순위의 역수를 평균한 값입니다. Hit Rate가 같아도 "관련 문서가 상위에 배치되는가"를 비교할 수 있습니다.
   - **평균 검색 문서 수**: Context 크기, 즉 비용과 노이즈를 확인합니다.
 - **Generation**: 질문마다 Baseline과 개선 Pipeline의 답변을 비교합니다. ① 근거와 일치하는지 ② 질문에 직접 답하는지 ③ Q9·Q10에서 근거 없는 답을 만들지 않는지 확인합니다.
 - 네 Pipeline(Baseline / Hybrid / +Decomposition / +Rerank)을 **같은 질문셋, 같은 Chunk·Embedding·Vector Store**로 비교합니다.
